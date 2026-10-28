@@ -18,7 +18,7 @@ export type AcpElicitationResponse =
 export type AcpElicitationPlan =
   | {
       kind: "questions";
-      payload: UserQuestionPendingInteractionPayload;
+      payloads: UserQuestionPendingInteractionPayload[];
       toResponse(
         resolution: UserQuestionPendingInteractionResolution,
       ): AcpElicitationResponse;
@@ -41,8 +41,11 @@ type AcpElicitationField =
 interface PlannedField {
   name: string;
   field: AcpElicitationField;
+  otherName?: string;
   question: PendingInteractionUserQuestionQuestion;
 }
+
+const OTHER_FIELD_SUFFIX = "__other";
 
 const CONFIRM_QUESTION_ID = "confirm";
 const CONFIRM_ACCEPT_VALUE = "accept";
@@ -115,6 +118,7 @@ function questionFor(
   name: string,
   schema: AcpJsonObject,
   field: AcpElicitationField,
+  hasOther: boolean,
   message: string | undefined,
 ): PendingInteractionUserQuestionQuestion {
   const label = readString(schema, "title")?.trim() || name;
@@ -124,7 +128,9 @@ function questionFor(
     label,
     ...(description ? [description] : []),
     ...(field.kind === "typedChoice"
-      ? [`One of: ${field.choices.map((choice) => choice.label).join(", ")}`]
+      ? [
+          `One of: ${field.choices.map((choice) => choice.label).join(", ")}${hasOther ? ", or your own answer" : ""}`,
+        ]
       : []),
     ...(field.kind === "number"
       ? [field.integer ? "Enter a whole number." : "Enter a number."]
@@ -141,14 +147,14 @@ function questionFor(
         ...base,
         multiSelect: false,
         options: field.choices,
-        allowFreeText: false,
+        allowFreeText: hasOther,
       };
     case "multiChoice":
       return {
         ...base,
         multiSelect: true,
         options: field.choices,
-        allowFreeText: false,
+        allowFreeText: hasOther,
       };
     case "boolean":
       return {
@@ -223,6 +229,27 @@ function decodeAnswer(
   }
 }
 
+function decodeEntry(
+  entry: PlannedField,
+  answer: PendingInteractionUserAnswer | undefined,
+): Record<string, unknown> | null {
+  const { name, otherName, field } = entry;
+  const typed = answer?.freeText?.trim();
+  if (!otherName || !answer || !typed) {
+    const decoded = decodeAnswer(field, answer);
+    return decoded ? { [name]: decoded.value } : null;
+  }
+  if (field.kind === "typedChoice") {
+    const match = decodeAnswer(field, answer);
+    return match ? { [name]: match.value } : { [otherName]: typed };
+  }
+  if (answer.selected.length === 0) {
+    return { [otherName]: typed };
+  }
+  const decoded = decodeAnswer(field, answer);
+  return decoded ? { [name]: decoded.value, [otherName]: typed } : null;
+}
+
 function planConfirmation(message: string | undefined): AcpElicitationPlan {
   const payload: UserQuestionPendingInteractionPayload = {
     kind: "user_question",
@@ -241,7 +268,7 @@ function planConfirmation(message: string | undefined): AcpElicitationPlan {
   };
   return {
     kind: "questions",
-    payload,
+    payloads: [payload],
     toResponse(resolution) {
       return resolution.answers[CONFIRM_QUESTION_ID]?.selected[0] ===
         CONFIRM_ACCEPT_VALUE
@@ -269,14 +296,8 @@ export function planAcpElicitation(params: unknown): AcpElicitationPlan {
   if (entries.length === 0) {
     return planConfirmation(message);
   }
-  if (entries.length > USER_QUESTION_MAX_QUESTIONS) {
-    return {
-      kind: "unsupported",
-      reason: `the form has ${entries.length} fields and bb shows at most ${USER_QUESTION_MAX_QUESTIONS}`,
-    };
-  }
 
-  const planned: PlannedField[] = [];
+  const fields: Array<[string, AcpJsonObject, AcpElicitationField]> = [];
   for (const [name, fieldSchema] of entries) {
     const field = isJsonObject(fieldSchema) ? planField(fieldSchema) : null;
     if (name.trim() === "" || !isJsonObject(fieldSchema) || !field) {
@@ -285,39 +306,72 @@ export function planAcpElicitation(params: unknown): AcpElicitationPlan {
         reason: `bb cannot show the field "${name}"`,
       };
     }
-    planned.push({
-      name,
-      field,
-      question: questionFor(
-        name,
-        fieldSchema,
-        field,
-        planned.length === 0 ? message : undefined,
-      ),
-    });
+    fields.push([name, fieldSchema, field]);
   }
+  const kinds = new Map(fields.map(([name, , field]) => [name, field.kind]));
+  const folded = new Set(
+    fields
+      .filter(([name, , field]) => {
+        const kind = name.endsWith(OTHER_FIELD_SUFFIX)
+          ? kinds.get(name.slice(0, -OTHER_FIELD_SUFFIX.length))
+          : undefined;
+        return (
+          (kind === "choice" ||
+            kind === "multiChoice" ||
+            kind === "typedChoice") &&
+          field.kind === "text"
+        );
+      })
+      .map(([name]) => name),
+  );
 
-  const payload = userQuestionPendingInteractionPayloadSchema.safeParse({
-    kind: "user_question",
-    questions: planned.map((entry) => entry.question),
-  });
-  if (!payload.success) {
-    return { kind: "unsupported", reason: "the form could not be shown" };
+  const planned: PlannedField[] = fields
+    .filter(([name]) => !folded.has(name))
+    .map(([name, fieldSchema, field], index) => {
+      const otherName = `${name}${OTHER_FIELD_SUFFIX}`;
+      const hasOther = folded.has(otherName);
+      return {
+        name,
+        field,
+        ...(hasOther ? { otherName } : {}),
+        question: questionFor(
+          name,
+          fieldSchema,
+          field,
+          hasOther,
+          index % USER_QUESTION_MAX_QUESTIONS === 0 ? message : undefined,
+        ),
+      };
+    });
+
+  const payloads: UserQuestionPendingInteractionPayload[] = [];
+  for (
+    let start = 0;
+    start < planned.length;
+    start += USER_QUESTION_MAX_QUESTIONS
+  ) {
+    const payload = userQuestionPendingInteractionPayloadSchema.safeParse({
+      kind: "user_question",
+      questions: planned
+        .slice(start, start + USER_QUESTION_MAX_QUESTIONS)
+        .map((entry) => entry.question),
+    });
+    if (!payload.success) {
+      return { kind: "unsupported", reason: "the form could not be shown" };
+    }
+    payloads.push(payload.data);
   }
   return {
     kind: "questions",
-    payload: payload.data,
+    payloads,
     toResponse(resolution) {
       const content: Record<string, unknown> = {};
       for (const entry of planned) {
-        const decoded = decodeAnswer(
-          entry.field,
-          resolution.answers[entry.name],
-        );
+        const decoded = decodeEntry(entry, resolution.answers[entry.name]);
         if (!decoded) {
           return { action: "decline" };
         }
-        content[entry.name] = decoded.value;
+        Object.assign(content, decoded);
       }
       return { action: "accept", content };
     },

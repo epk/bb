@@ -1,3 +1,4 @@
+import type { PendingInteractionUserAnswer } from "@bb/domain";
 import { describe, expect, it } from "vitest";
 import { planAcpElicitation } from "./elicitation.js";
 
@@ -43,7 +44,8 @@ describe("planAcpElicitation", () => {
       ),
     );
 
-    expect(plan.payload.questions).toEqual([
+    expect(plan.payloads).toHaveLength(1);
+    expect(plan.payloads[0]?.questions).toEqual([
       {
         id: "strategy",
         prompt: "Pick a plan\n\nStrategy\nHow far to go",
@@ -138,11 +140,11 @@ describe("planAcpElicitation", () => {
         }),
       ),
     );
-    expect(plan.payload.questions[0]).toMatchObject({
+    expect(plan.payloads[0]?.questions[0]).toMatchObject({
       allowFreeText: true,
       prompt: "Pick a plan\n\nbranch\nOne of: MAIN, DEV, RELEASE, HOTFIX, NEXT",
     });
-    expect(plan.payload.questions[0]?.options).toBeUndefined();
+    expect(plan.payloads[0]?.questions[0]?.options).toBeUndefined();
     expect(
       plan.toResponse({
         kind: "user_answer",
@@ -159,7 +161,7 @@ describe("planAcpElicitation", () => {
 
   it("shows a form without fields as accept or decline", () => {
     const plan = questions(planAcpElicitation(form({}, "Deploy now?")));
-    expect(plan.payload.questions).toMatchObject([
+    expect(plan.payloads[0]?.questions).toMatchObject([
       {
         prompt: "Deploy now?",
         options: [{ label: "Accept" }, { label: "Decline" }],
@@ -179,24 +181,127 @@ describe("planAcpElicitation", () => {
     ).toEqual({ action: "decline" });
   });
 
+  it("answers a choice's `__other` field from the question's Other box instead of asking it separately", () => {
+    const plan = questions(
+      planAcpElicitation(
+        form({
+          q0: {
+            type: "string",
+            title: "Which runner?",
+            oneOf: [
+              { const: "Vitest", title: "Vitest" },
+              { const: "Jest", title: "Jest" },
+            ],
+          },
+          q0__other: { type: "string", title: "Other (type your own)" },
+          q1: {
+            type: "array",
+            title: "Which suites?",
+            items: { anyOf: [{ const: "unit" }, { const: "e2e" }] },
+          },
+          q1__other: { type: "string", title: "Other (type your own)" },
+          notes__other: { type: "string", title: "Notes" },
+        }),
+      ),
+    );
+    expect(plan.payloads[0]?.questions).toMatchObject([
+      { id: "q0", multiSelect: false, allowFreeText: true },
+      { id: "q1", multiSelect: true, allowFreeText: true },
+      { id: "notes__other", allowFreeText: true },
+    ]);
+
+    const answer = (
+      q0: PendingInteractionUserAnswer,
+      q1: PendingInteractionUserAnswer,
+    ) =>
+      plan.toResponse({
+        kind: "user_answer",
+        answers: { q0, q1, notes__other: { selected: [], freeText: "n" } },
+      });
+    expect(answer({ selected: ["Jest"] }, { selected: [] })).toEqual({
+      action: "accept",
+      content: { q0: "Jest", q1: [], notes__other: "n" },
+    });
+    expect(
+      answer(
+        { selected: [], freeText: " Mocha " },
+        { selected: ["unit"], freeText: "smoke" },
+      ),
+    ).toEqual({
+      action: "accept",
+      content: {
+        q0__other: "Mocha",
+        q1: ["unit"],
+        q1__other: "smoke",
+        notes__other: "n",
+      },
+    });
+    expect(answer({ selected: [] }, { selected: [] })).toEqual({
+      action: "decline",
+    });
+  });
+
+  it("keeps a typed answer that matches no option as the `__other` value", () => {
+    const plan = questions(
+      planAcpElicitation(
+        form({
+          branch: {
+            type: "string",
+            enum: ["main", "dev", "release", "hotfix", "next"],
+          },
+          branch__other: { type: "string" },
+        }),
+      ),
+    );
+    const answer = (freeText: string) =>
+      plan.toResponse({
+        kind: "user_answer",
+        answers: { branch: { selected: [], freeText } },
+      });
+    expect(answer("DEV")).toEqual({
+      action: "accept",
+      content: { branch: "dev" },
+    });
+    expect(answer("staging")).toEqual({
+      action: "accept",
+      content: { branch__other: "staging" },
+    });
+  });
+
+  it("splits more questions than a card shows into cards of four, and answers once from all of them", () => {
+    const names = ["a", "b", "c", "d", "e"];
+    const plan = questions(
+      planAcpElicitation(
+        form(
+          Object.fromEntries(names.map((name) => [name, { type: "string" }])),
+          "Five things",
+        ),
+      ),
+    );
+    expect(
+      plan.payloads.map((payload) =>
+        payload.questions.map((question) => question.prompt),
+      ),
+    ).toEqual([["Five things\n\na", "b", "c", "d"], ["Five things\n\ne"]]);
+    expect(
+      plan.toResponse({
+        kind: "user_answer",
+        answers: Object.fromEntries(
+          names.map((name) => [name, { selected: [], freeText: name }]),
+        ),
+      }),
+    ).toEqual({
+      action: "accept",
+      content: { a: "a", b: "b", c: "c", d: "d", e: "e" },
+    });
+  });
+
   it("refuses forms it cannot show, with the reason", () => {
     expect(
       planAcpElicitation({ mode: "url", url: "https://example.com" }),
     ).toEqual({
       kind: "unsupported",
       reason: 'bb does not offer the "url" elicitation mode',
-    });
-    expect(
-      planAcpElicitation(
-        form(
-          Object.fromEntries(
-            ["a", "b", "c", "d", "e"].map((name) => [name, { type: "string" }]),
-          ),
-        ),
-      ),
-    ).toEqual({
-      kind: "unsupported",
-      reason: "the form has 5 fields and bb shows at most 4",
     });
     expect(planAcpElicitation(form({ nested: { type: "object" } }))).toEqual({
       kind: "unsupported",

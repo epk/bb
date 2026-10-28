@@ -14,6 +14,7 @@ import type {
   ReasoningLevel,
   SessionOptionSelections,
   ThreadSessionOption,
+  UserQuestionPendingInteractionResolution,
 } from "@bb/domain";
 import { acpLaunchSpecSchema, type AcpLaunchSpec } from "../launch-spec.js";
 import {
@@ -1907,30 +1908,33 @@ function handleElicitationRequest(
     openAgentTurn(session);
   }
   session.pendingElicitations.add(responder);
-  void sendRuntimeRequest(BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest, {
-    providerThreadId: session.providerThreadId,
-    threadId: session.bbThreadId,
-    turnId: null,
-    payload: plan.payload,
-  })
-    .then((result) => {
-      if (!session.pendingElicitations.delete(responder)) {
+  void (async () => {
+    const answers: UserQuestionPendingInteractionResolution["answers"] = {};
+    for (const payload of plan.payloads) {
+      const result = await sendRuntimeRequest(
+        BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest,
+        {
+          providerThreadId: session.providerThreadId,
+          threadId: session.bbThreadId,
+          turnId: null,
+          payload,
+        },
+      ).catch(() => undefined);
+      if (!session.pendingElicitations.has(responder)) {
         return;
       }
       const resolution =
         userQuestionPendingInteractionResolutionSchema.safeParse(result);
-      responder.result(
-        resolution.success
-          ? plan.toResponse(resolution.data)
-          : { action: "cancel" },
-      );
-    })
-    .catch(() => {
-      if (!session.pendingElicitations.delete(responder)) {
+      if (!resolution.success) {
+        session.pendingElicitations.delete(responder);
+        responder.result({ action: "cancel" });
         return;
       }
-      responder.result({ action: "cancel" });
-    });
+      Object.assign(answers, resolution.data.answers);
+    }
+    session.pendingElicitations.delete(responder);
+    responder.result(plan.toResponse({ kind: "user_answer", answers }));
+  })();
 }
 
 function handlePermissionRequest(

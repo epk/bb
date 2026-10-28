@@ -5189,10 +5189,52 @@ describe("acp bridge: questions the agent asks", () => {
     );
   });
 
+  it("asks a form with more questions than a card shows as cards in turn, and answers the agent once", async () => {
+    const { providerThreadId } = await startThread();
+    const turnId = sendTurnRequest("turn/start", providerThreadId, {
+      input: [{ type: "text", text: "ask-form-five", mentions: [] }],
+    });
+    await waitForResponse(turnId);
+
+    const cards = () =>
+      output.messages.filter(
+        (message) =>
+          message.method === "interaction/request" && message.id !== undefined,
+      );
+    const answerCard = (index: number, ids: string[]) => {
+      const card = cards()[index];
+      expect(card?.params).toMatchObject({
+        payload: { questions: ids.map((id) => ({ id })) },
+      });
+      handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: card?.id,
+          result: {
+            kind: "user_answer",
+            answers: Object.fromEntries(
+              ids.map((id) => [id, { selected: [], freeText: id }]),
+            ),
+          },
+        }),
+      );
+    };
+
+    await waitFor(() => cards()[0], "first card");
+    expect(cards()).toHaveLength(1);
+    answerCard(0, ["a", "b", "c", "d"]);
+    await waitFor(() => cards()[1], "second card");
+    answerCard(1, ["e"]);
+    await waitForTurnCompleted();
+    expect(agentMessageTexts()).toContain(
+      'elicitation:{"action":"accept","content":{"a":"a","b":"b","c":"c","d":"d","e":"e"}}',
+    );
+  });
+
   it("declines a form it cannot show and says why", async () => {
     const { providerThreadId } = await startThread();
     const turnId = sendTurnRequest("turn/start", providerThreadId, {
-      input: [{ type: "text", text: "ask-form-too-large", mentions: [] }],
+      input: [{ type: "text", text: "ask-form-unshowable", mentions: [] }],
     });
     await waitForResponse(turnId);
     await waitForTurnCompleted();
@@ -5201,7 +5243,7 @@ describe("acp bridge: questions the agent asks", () => {
     expect(threadEventsOfType("provider/warning").at(-1)).toMatchObject({
       summary: "The agent asked a question bb could not show",
       details:
-        "The request was declined because the form has 5 fields and bb shows at most 4.",
+        'The request was declined because bb cannot show the field "nested".',
     });
     expect(
       output.messages.filter(

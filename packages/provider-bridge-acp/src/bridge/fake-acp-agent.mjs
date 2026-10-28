@@ -106,7 +106,8 @@
  * - "stop-reason:<reason>"       → end the turn with that stop reason
  * - "advertise-commands"         → advertise two slash commands, twice
  * - "ask-form"                   → ask a two-field form question
- * - "ask-form-too-large"         → ask a form with more fields than bb shows
+ * - "ask-form-five"              → ask a five-field form, more than one card shows
+ * - "ask-form-unshowable"        → ask a form with a field bb cannot show
  */
 
 import { spawn } from "node:child_process";
@@ -737,18 +738,20 @@ async function handlePrompt(message) {
     });
     notifyUpdate(messageChunk("commands advertised"));
   } else if (text.includes("ask-form")) {
-    const properties = text.includes("ask-form-too-large")
+    const properties = text.includes("ask-form-five")
       ? Object.fromEntries(
           ["a", "b", "c", "d", "e"].map((name) => [name, { type: "string" }]),
         )
-      : {
-          strategy: {
-            type: "string",
-            title: "Strategy",
-            enum: ["conservative", "balanced"],
-          },
-          dryRun: { type: "boolean", title: "Dry run" },
-        };
+      : text.includes("ask-form-unshowable")
+        ? { nested: { type: "object" } }
+        : {
+            strategy: {
+              type: "string",
+              title: "Strategy",
+              enum: ["conservative", "balanced"],
+            },
+            dryRun: { type: "boolean", title: "Dry run" },
+          };
     const result = await requestClient("elicitation/create", {
       sessionId: activeSessionId,
       mode: "form",

@@ -309,17 +309,22 @@ export function planAcpElicitation(params: unknown): AcpElicitationPlan {
     fields.push([name, fieldSchema, field]);
   }
   const kinds = new Map(fields.map(([name, , field]) => [name, field.kind]));
+  const requiredList = isJsonObject(schema) ? schema["required"] : undefined;
+  const required = new Set(Array.isArray(requiredList) ? requiredList : []);
   const folded = new Set(
     fields
       .filter(([name, , field]) => {
+        const base = name.slice(0, -OTHER_FIELD_SUFFIX.length);
         const kind = name.endsWith(OTHER_FIELD_SUFFIX)
-          ? kinds.get(name.slice(0, -OTHER_FIELD_SUFFIX.length))
+          ? kinds.get(base)
           : undefined;
         return (
           (kind === "choice" ||
             kind === "multiChoice" ||
             kind === "typedChoice") &&
-          field.kind === "text"
+          field.kind === "text" &&
+          !required.has(name) &&
+          !required.has(base)
         );
       })
       .map(([name]) => name),

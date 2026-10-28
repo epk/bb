@@ -268,6 +268,36 @@ describe("planAcpElicitation", () => {
     });
   });
 
+  it("asks a required `__other` field as its own question, so both required keys come back", () => {
+    const plan = questions(
+      planAcpElicitation({
+        sessionId: "s1",
+        mode: "form",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            q0: { type: "string", enum: ["A", "B"] },
+            q0__other: { type: "string" },
+          },
+          required: ["q0", "q0__other"],
+        },
+      }),
+    );
+    expect(plan.payloads[0]?.questions).toMatchObject([
+      { id: "q0", allowFreeText: false },
+      { id: "q0__other", allowFreeText: true },
+    ]);
+    expect(
+      plan.toResponse({
+        kind: "user_answer",
+        answers: {
+          q0: { selected: ["A"] },
+          q0__other: { selected: [], freeText: "why" },
+        },
+      }),
+    ).toEqual({ action: "accept", content: { q0: "A", q0__other: "why" } });
+  });
+
   it("splits more questions than a card shows into cards of four, and answers once from all of them", () => {
     const names = ["a", "b", "c", "d", "e"];
     const plan = questions(

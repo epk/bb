@@ -494,6 +494,19 @@ export function MessageActionBar({
               <MessageTimestampFooter timestamp={timestamp} />
             </DropdownMenuContent>
           </DropdownMenu>
+          <time
+            className={cn(
+              "shrink-0 text-xs whitespace-nowrap text-subtle-foreground",
+              HOVER_REVEAL_CLASS,
+            )}
+            dateTime={new Date(timestamp).toISOString()}
+            title={new Date(timestamp).toLocaleString(undefined, {
+              dateStyle: "full",
+              timeStyle: "long",
+            })}
+          >
+            {formatShortMessageTime(timestamp, new Date())}
+          </time>
         </div>
       </div>
     </TooltipProvider>
